@@ -51,3 +51,7 @@ DerivedData/
 *~
 .cache/
 
+# Documentation files (keep local, exclude from repo)
+*.md
+!README.md
+
