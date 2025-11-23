@@ -19,8 +19,9 @@ import UIKit // For haptic feedback
     
     // RSSI tracking for tap-to-target
     private var rssiSamples: [String: [Int]] = [:] // Track RSSI samples per EID
-    private let rssiThreshold: Int = -60 // dBm threshold (phones must be close)
-    private let requiredSamples: Int = 4 // Need 4 out of 5 samples above threshold
+    private let rssiThreshold: Int = -40 // dBm threshold (phones must be tapped together, tops touching)
+    private let minAverageRSSI: Int = -35 // Minimum average RSSI required (very strict - phones must be touching)
+    private let requiredSamples: Int = 5 // Need all 5 samples above threshold (strict)
     private let sampleWindow: Int = 5 // Keep last 5 samples per device
     var onEIDReady: ((String) -> Void)? // Callback when EID passes RSSI gate
     
@@ -87,21 +88,36 @@ import UIKit // For haptic feedback
             rssiSamples[eid]?.removeFirst() // Remove oldest sample
         } // End if
         let samples = rssiSamples[eid]! // Get current samples
+        let avgRSSI = samples.reduce(0, +) / samples.count // Calculate average RSSI
+        guard samples.count >= requiredSamples else { // Need minimum samples before checking
+            if avgRSSI < rssiThreshold - 20 { // Very far (across room)
+                statusText = "Too far - bring phones closer" // Update status
+            } else if avgRSSI < rssiThreshold - 10 { // Getting closer
+                statusText = "Getting closer..." // Update status
+            } else { // Close but need more samples
+                statusText = "Almost there... tap phones together" // Update status
+            } // End branches
+            return // Exit early if not enough samples
+        } // End guard
         let strongSamples = samples.filter { $0 > rssiThreshold }.count // Count samples above threshold
-        if strongSamples >= requiredSamples && readyToPayEID == nil { // Passes gate and not already set
+        // Require ALL samples above threshold AND average must exceed minimum (very strict - phones must be touching)
+        if strongSamples >= requiredSamples && avgRSSI > minAverageRSSI && readyToPayEID == nil { // Passes strict gate and not already set
             readyToPayEID = eid // Mark as ready
             statusText = "Payment session detected!" // Update status
             let generator = UINotificationFeedbackGenerator() // Create haptic generator
             generator.notificationOccurred(.success) // Success haptic
             onEIDReady?(eid) // Trigger callback for auto-resolve
-        } else if strongSamples < requiredSamples { // Not close enough
-            let avgRSSI = samples.reduce(0, +) / samples.count // Calculate average
-            if avgRSSI < rssiThreshold - 10 { // Very far
+        } else { // Not close enough or not all samples pass
+            if avgRSSI < rssiThreshold - 20 { // Very far (across room)
                 statusText = "Too far - bring phones closer" // Update status
-            } else if avgRSSI < rssiThreshold { // Getting closer
+            } else if avgRSSI < rssiThreshold - 10 { // Getting closer
                 statusText = "Getting closer..." // Update status
-            } else { // Close but need more samples
-                statusText = "Almost there..." // Update status
+            } else if avgRSSI < minAverageRSSI { // Close but not tapped together
+                statusText = "Tap phones together - tops touching" // Update status
+            } else if strongSamples < requiredSamples { // Close but need more consistent samples
+                statusText = "Hold phones together firmly" // Update status
+            } else { // Edge case
+                statusText = "Tap phones together" // Update status
             } // End branches
         } // End if
     } // End checkRSSIGate
