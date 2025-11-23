@@ -4,6 +4,8 @@
 <dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Used to Discover Nearby Pay Requests</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Used to Advertise Payment Requests</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

@@ -21,7 +21,7 @@ import Foundation // Provides Combine + async features
     @Published var showPaymentRequestSheet: Bool = false // Controls payment request sheet visibility
     @Published var showPaySheet: Bool = false // Controls pay sheet visibility (after locking)
     @Published var sessionLocked: Bool = false // Tracks if session is locked
-    @Published var baseURLString: String = "http://localhost:3001" { // Editable base URL string
+    @Published var baseURLString: String = "http://Abhinavs-MacBook-Pro.local:3001" { // Editable base URL string (uses Bonjour hostname)
         didSet { // Observe changes
             print("🔗 Setting base URL: \(baseURLString)") // Debug log
             if let url = URL(string: baseURLString) { // Validate URL

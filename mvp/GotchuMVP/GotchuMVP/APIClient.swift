@@ -1,8 +1,6 @@
 //
-//  APIClient.swift // File header for clarity
-//  GotchuMVP // Project name
-//
-//  Created by ChatGPT on 11/19/25. // Metadata comment
+//  APIClient.swift
+//  GotchuMVP
 //
 
 import Foundation // Provides networking primitives
@@ -135,7 +133,7 @@ struct SendResponse: Decodable { // Wallet send response
 @MainActor final class APIClient: ObservableObject { // Handles HTTP calls on main actor
     static let shared = APIClient() // Shared singleton for convenience
     private let session: URLSession // URLSession reference
-    @Published var baseURL = URL(string: "http://localhost:3001")! // Default base URL editable later
+    @Published var baseURL = URL(string: "http://Abhinavs-MacBook-Pro.local:3001")! // Default base URL (uses Bonjour hostname)
     
     private init() { // Private initializer for singleton
         let config = URLSessionConfiguration.default // Get default config
@@ -202,13 +200,24 @@ struct SendResponse: Decodable { // Wallet send response
     private struct EmptyResponse: Decodable {} // Placeholder for endpoints with no body
     
     private func send<T: Decodable>(request: inout URLRequest) async throws -> T { // Generic send for inout request
-        print("🌐 API Request: \(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "unknown")") // Debug log
+        let urlString = request.url?.absoluteString ?? "unknown" // Get URL string
+        print("🌐 API Request: \(request.httpMethod ?? "GET") \(urlString)") // Debug log
+        print("🔗 Base URL: \(baseURL.absoluteString)") // Debug base URL
         do { // Begin error handling
             let (data, response) = try await session.data(for: request) // Perform network call
-            print("✅ API Response: \(response)") // Debug log
+            if let httpResponse = response as? HTTPURLResponse { // Check if HTTP response
+                print("✅ API Response: \(httpResponse.statusCode) from \(urlString)") // Debug log with status
+            } else { // Not HTTP response
+                print("✅ API Response: \(response)") // Debug log
+            } // End if
             return try decodeResponse(data: data, response: response) // Decode typed payload
         } catch { // Catch network errors
             print("❌ API Error: \(error.localizedDescription)") // Debug log
+            print("❌ Failed URL: \(urlString)") // Debug failed URL
+            if let urlError = error as? URLError { // Check if URL error
+                print("❌ URL Error Code: \(urlError.code.rawValue)") // Debug error code
+                print("❌ URL Error Description: \(urlError.localizedDescription)") // Debug description
+            } // End if
             throw error // Re-throw error
         } // End catch
     } // End send for inout

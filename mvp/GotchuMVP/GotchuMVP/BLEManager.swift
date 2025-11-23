@@ -1,8 +1,6 @@
 //
-//  BLEManager.swift // File header comment
-//  GotchuMVP // Project name
-//
-//  Created by ChatGPT on 11/19/25. // Metadata comment
+//  BLEManager.swift
+//  GotchuMVP
 //
 
 import Foundation // Base types
@@ -36,20 +34,20 @@ import UIKit // For haptic feedback
         advertisingEID = eid // Remember current EID
         guard peripheralManager.state == .poweredOn else { // Ensure BLE ready
             statusText = "BLE off" // Update status
+            print("❌ BLE: Cannot advertise - BLE not powered on") // Debug log
             return // Exit early
         } // End guard
-        let data = eidData(from: eid) // Convert string to data
-        // Use manufacturer data for custom payload (company ID 0xFFFF for development)
-        // Format: [company ID (2 bytes) + EID data (5 bytes)]
-        var manufacturerData = Data() // Create data container
-        manufacturerData.append(contentsOf: [0xFF, 0xFF]) // Add company ID (0xFFFF for dev)
-        manufacturerData.append(data) // Append EID data
+        print("📡 BLE: Starting to advertise EID=\(eid)") // Debug log
+        // Use local name to carry EID (more reliable than manufacturer data on iOS)
+        // Format: "GOTCHU" + EID (10 chars) = 16 chars total (iOS allows up to 29 chars)
+        let localName = "GOTCHU\(eid)" // Create local name with EID
         let advertisement: [String: Any] = [
-            CBAdvertisementDataServiceUUIDsKey: [serviceUUID], // Include service UUID for filtering
-            CBAdvertisementDataManufacturerDataKey: manufacturerData // Include EID in manufacturer data
+            CBAdvertisementDataLocalNameKey: localName, // Include EID in local name
+            CBAdvertisementDataServiceUUIDsKey: [serviceUUID] // Include service UUID for filtering
         ] // End advertisement dictionary
         peripheralManager.startAdvertising(advertisement) // Start broadcasting
         statusText = "Advertising \(eid)" // Update status text
+        print("✅ BLE: Advertising started for EID=\(eid), localName=\(localName)") // Debug log
     } // End startAdvertising
     
     func stopAdvertising() { // Stops advertising
@@ -61,12 +59,16 @@ import UIKit // For haptic feedback
     func startScanning() { // Begins scanning for EIDs
         guard centralManager.state == .poweredOn else { // Ensure BLE ready
             statusText = "Scanner off" // Update status
+            print("❌ BLE: Cannot scan - BLE not powered on") // Debug log
             return // Exit
         } // End guard
         rssiSamples.removeAll() // Clear RSSI tracking
         readyToPayEID = nil // Clear ready EID
-        centralManager.scanForPeripherals(withServices: [serviceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]) // Start scan
+        print("🔍 BLE: Starting scan (no service filter to get manufacturer data)") // Debug log
+        // Scan without service filter to get manufacturer data, we'll filter manually
+        centralManager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]) // Start scan without filtering
         statusText = "Scanning - Bring phones close together" // Update status
+        print("✅ BLE: Scan started") // Debug log
     } // End startScanning
     
     func stopScanning() { // Stops scanning
@@ -142,22 +144,26 @@ extension BLEManager: CBCentralManagerDelegate { // Central delegate conformance
         // Check for our service UUID first (for filtering)
         guard let serviceUUIDs = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID],
               serviceUUIDs.contains(serviceUUID) else { // Must include our service UUID
-            return // Not our service, ignore
+            return // Not our service, ignore silently (too many other BLE devices)
         } // End guard
-        // Extract EID from manufacturer data (format: [0xFF, 0xFF] + EID bytes)
-        if let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
-           manufacturerData.count >= 7, // Must have company ID (2 bytes) + EID (5 bytes)
-           manufacturerData[0] == 0xFF && manufacturerData[1] == 0xFF { // Check company ID
-            let eidData = manufacturerData.subdata(in: 2..<manufacturerData.count) // Extract EID bytes (skip first 2)
-            let eid = eidData.map { String(format: "%02x", $0) }.joined() // Convert bytes to hex string
+        // Extract EID from local name (format: "GOTCHU" + EID)
+        if let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String,
+           localName.hasPrefix("GOTCHU"), // Check if starts with "GOTCHU"
+           localName.count == 16 { // Should be "GOTCHU" (6) + EID (10) = 16 chars
+            let eid = String(localName.dropFirst(6)) // Extract EID (skip "GOTCHU" prefix)
             let rssiValue = RSSI.intValue // Convert RSSI to Int
+            print("✅ BLE: Found EID=\(eid), RSSI=\(rssiValue), localName=\(localName)") // Debug log
             Task { @MainActor in // Switch to main actor for UI updates
                 if !discoveredEIDs.contains(eid) { // Avoid duplicates
                     discoveredEIDs.append(eid) // Append new EID
+                    print("📱 Added EID to discovered list: \(eid)") // Debug log
                 } // End duplicate check
                 checkRSSIGate(eid: eid, rssi: rssiValue) // Check if passes RSSI gate
             } // End Task
-        } // End manufacturer data guard
+        } else { // Local name missing or invalid format
+            let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "none" // Get local name or "none"
+            print("❌ BLE: Local name missing or invalid format (localName=\(localName), count=\(localName.count))") // Debug log
+        } // End local name guard
     } // End didDiscover
 } // End extension
 
