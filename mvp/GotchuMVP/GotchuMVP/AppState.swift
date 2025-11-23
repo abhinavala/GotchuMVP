@@ -1,8 +1,6 @@
 //
-//  AppState.swift // File header comment
-//  GotchuMVP // Project name
-//
-//  Created by ChatGPT on 11/19/25. // Metadata comment
+//  AppState.swift
+//  GotchuMVP
 //
 
 import Foundation // Provides Combine + async features
