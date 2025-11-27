@@ -83,16 +83,18 @@ struct SessionResponse: Decodable, Identifiable, Equatable { // Session creation
 struct ResolveResponse: Decodable { // Resolve endpoint payload
     let sid: String // Session identifier
     let amount_cents: Int // Amount in cents
+    let status: String? // Session status (optional for backward compatibility)
     let payee_display: PayeeDisplay // Payee info
     
     enum CodingKeys: String, CodingKey { // Custom coding keys
-        case sid, amount_cents, payee_display // Map keys
+        case sid, amount_cents, status, payee_display // Map keys
     } // End CodingKeys
     
     init(from decoder: Decoder) throws { // Custom decoder
         let container = try decoder.container(keyedBy: CodingKeys.self) // Get container
         sid = try container.decode(String.self, forKey: .sid) // Decode session ID
         payee_display = try container.decode(PayeeDisplay.self, forKey: .payee_display) // Decode payee
+        status = try? container.decode(String.self, forKey: .status) // Decode status (optional)
         // Handle both string and int for amount_cents
         if let intValue = try? container.decode(Int.self, forKey: .amount_cents) { // Try int first
             amount_cents = intValue // Use int value
@@ -107,6 +109,55 @@ struct ResolveResponse: Decodable { // Resolve endpoint payload
 struct PayeeDisplay: Decodable { // Payee info container
     let name: String // Display name
 } // End of PayeeDisplay
+
+struct UserInfo: Decodable, Identifiable { // User info for listing
+    let id: String // User ID
+    let email: String // Email address
+    let display_name: String // Display name
+} // End of UserInfo
+
+struct UsersListResponse: Decodable { // Users list response
+    let users: [UserInfo] // List of users
+} // End of UsersListResponse
+
+struct PaymentOffer: Decodable, Identifiable { // Payment offer (pending acceptance)
+    var id: String { sid } // Use sid as SwiftUI ID
+    let sid: String // Session ID
+    let amount_cents: Int // Amount in cents
+    let payer_display: PayeeDisplay // Payer info
+    let exp_at: String // Expiration time
+    let created_at: String // Creation time
+    
+    enum CodingKeys: String, CodingKey { // Custom coding keys
+        case sid, amount_cents, payer_display, exp_at, created_at // Map keys
+    } // End CodingKeys
+    
+    init(from decoder: Decoder) throws { // Custom decoder
+        let container = try decoder.container(keyedBy: CodingKeys.self) // Get container
+        sid = try container.decode(String.self, forKey: .sid) // Decode session ID
+        payer_display = try container.decode(PayeeDisplay.self, forKey: .payer_display) // Decode payer
+        exp_at = try container.decode(String.self, forKey: .exp_at) // Decode expiration
+        created_at = try container.decode(String.self, forKey: .created_at) // Decode creation time
+        // Handle both string and int for amount_cents
+        if let intValue = try? container.decode(Int.self, forKey: .amount_cents) { // Try int first
+            amount_cents = intValue // Use int value
+        } else if let stringValue = try? container.decode(String.self, forKey: .amount_cents) { // Try string
+            amount_cents = Int(stringValue) ?? 0 // Convert string to int
+        } else { // Neither worked
+            amount_cents = 0 // Default to zero
+        } // End branches
+    } // End init
+} // End of PaymentOffer
+
+struct PendingOffersResponse: Decodable { // Pending offers response
+    let offers: [PaymentOffer] // List of offers
+} // End of PendingOffersResponse
+
+struct AcceptOfferResponse: Decodable { // Accept offer response
+    let ok: Bool // Success flag
+    let eid: String // EID for the session
+    let sid: String // Session ID
+} // End of AcceptOfferResponse
 
 struct SendResponse: Decodable { // Wallet send response
     let ok: Bool // Indicates success
@@ -190,6 +241,33 @@ struct SendResponse: Decodable { // Wallet send response
         request.httpBody = try JSONEncoder().encode(["sid": sid]) // Encode SID
         return try await send(request: request) // Execute call
     } // End sendPayment
+    
+    func listUsers(token: String) async throws -> UsersListResponse { // Lists all users
+        var request = authorizedRequest(path: "users/list", token: token) // Build request
+        return try await send(request: &request) // Execute call
+    } // End listUsers
+    
+    func createPaymentOffer(payeeID: String, amount: Int, token: String) async throws -> SessionResponse { // Creates payment offer (push payment)
+        var request = authorizedRequest(path: "sessions/create-offer", token: token) // Build request
+        request.httpMethod = "POST" // Use POST
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type") // JSON header
+        let payload: [String: Any] = ["payee_id": payeeID, "amount_cents": amount] // Payload dictionary
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload) // Serialize payload
+        return try await send(request: &request) // Call server
+    } // End createPaymentOffer
+    
+    func getPendingOffers(token: String) async throws -> PendingOffersResponse { // Gets pending payment offers for receiver
+        var request = authorizedRequest(path: "sessions/pending-offers", token: token) // Build request
+        return try await send(request: &request) // Execute call
+    } // End getPendingOffers
+    
+    func acceptOffer(sid: String, token: String) async throws -> AcceptOfferResponse { // Accepts payment offer
+        var request = authorizedRequest(path: "sessions/accept-offer", token: token) // Build request
+        request.httpMethod = "POST" // Use POST
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type") // JSON header
+        request.httpBody = try JSONEncoder().encode(["sid": sid]) // Encode SID
+        return try await send(request: request) // Execute call
+    } // End acceptOffer
     
     private func authorizedRequest(path: String, token: String) -> URLRequest { // Helper for auth requests
         var request = URLRequest(url: baseURL.appendingPathComponent(path)) // Build URL

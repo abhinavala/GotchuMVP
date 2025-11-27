@@ -12,18 +12,22 @@ import UIKit // For haptic feedback
     @Published var advertisingEID: String? // Currently advertised EID
     @Published var statusText: String = "Idle" // Human readable status
     @Published var readyToPayEID: String? // EID that passed RSSI gate (ready for payment request)
+    @Published var discoveredUsers: [String] = [] // List of nearby available users (user IDs)
+    @Published var advertisingUserID: String? // Currently advertised user ID (for availability)
+    @Published var readyToSendUserID: String? // User ID that passed RSSI gate (ready to send payment)
     
     private let serviceUUID = CBUUID(string: "0000FEED-0000-1000-8000-00805F9B34FB") // Gotchu service UUID
     private var peripheralManager: CBPeripheralManager! // Handles advertising
     private var centralManager: CBCentralManager! // Handles scanning
     
     // RSSI tracking for tap-to-target
-    private var rssiSamples: [String: [Int]] = [:] // Track RSSI samples per EID
+    private var rssiSamples: [String: [Int]] = [:] // Track RSSI samples per EID/userID
     private let rssiThreshold: Int = -40 // dBm threshold (phones must be tapped together, tops touching)
     private let minAverageRSSI: Int = -35 // Minimum average RSSI required (very strict - phones must be touching)
     private let requiredSamples: Int = 5 // Need all 5 samples above threshold (strict)
     private let sampleWindow: Int = 5 // Keep last 5 samples per device
     var onEIDReady: ((String) -> Void)? // Callback when EID passes RSSI gate
+    var onUserReady: ((String) -> Void)? // Callback when user ID passes RSSI gate (for push payments)
     
     override init() { // Initializer
         super.init() // Call superclass init
@@ -54,8 +58,29 @@ import UIKit // For haptic feedback
     func stopAdvertising() { // Stops advertising
         peripheralManager.stopAdvertising() // Stop peripheral manager
         advertisingEID = nil // Clear state
+        advertisingUserID = nil // Clear user ID state
         statusText = "Idle" // Reset status
     } // End stopAdvertising
+    
+    func startAdvertisingAvailability(userID: String) { // Begins advertising user availability
+        advertisingUserID = userID // Remember current user ID
+        guard peripheralManager.state == .poweredOn else { // Ensure BLE ready
+            statusText = "BLE off" // Update status
+            print("❌ BLE: Cannot advertise - BLE not powered on") // Debug log
+            return // Exit early
+        } // End guard
+        print("📡 BLE: Starting to advertise availability for userID=\(userID)") // Debug log
+        // Use local name to carry user ID (format: "AVAIL" + first 8 chars of UUID without dashes)
+        let userIDShort = String(userID.replacingOccurrences(of: "-", with: "").prefix(8)) // Get first 8 chars
+        let localName = "AVAIL\(userIDShort)" // Create local name with user ID
+        let advertisement: [String: Any] = [
+            CBAdvertisementDataLocalNameKey: localName, // Include user ID in local name
+            CBAdvertisementDataServiceUUIDsKey: [serviceUUID] // Include service UUID for filtering
+        ] // End advertisement dictionary
+        peripheralManager.startAdvertising(advertisement) // Start broadcasting
+        statusText = "Advertising availability" // Update status text
+        print("✅ BLE: Advertising availability started, localName=\(localName)") // Debug log
+    } // End startAdvertisingAvailability
     
     func startScanning() { // Begins scanning for EIDs
         guard centralManager.state == .poweredOn else { // Ensure BLE ready
@@ -65,6 +90,8 @@ import UIKit // For haptic feedback
         } // End guard
         rssiSamples.removeAll() // Clear RSSI tracking
         readyToPayEID = nil // Clear ready EID
+        readyToSendUserID = nil // Clear ready user ID
+        discoveredUsers.removeAll() // Clear discovered users
         print("🔍 BLE: Starting scan (no service filter to get manufacturer data)") // Debug log
         // Scan without service filter to get manufacturer data, we'll filter manually
         centralManager.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]) // Start scan without filtering
@@ -76,22 +103,24 @@ import UIKit // For haptic feedback
         centralManager.stopScan() // Stop scan
         rssiSamples.removeAll() // Clear RSSI tracking
         readyToPayEID = nil // Clear ready EID
+        readyToSendUserID = nil // Clear ready user ID
+        discoveredUsers.removeAll() // Clear discovered users
         statusText = "Idle" // Reset status
     } // End stopScanning
     
-    private func checkRSSIGate(eid: String, rssi: Int) { // Checks if EID passes RSSI gate
-        if rssiSamples[eid] == nil { // Initialize if first sample
-            rssiSamples[eid] = [] // Create empty array
+    private func checkRSSIGate(identifier: String, rssi: Int, isUserID: Bool = false) { // Checks if identifier passes RSSI gate
+        if rssiSamples[identifier] == nil { // Initialize if first sample
+            rssiSamples[identifier] = [] // Create empty array
         } // End if
-        rssiSamples[eid]?.append(rssi) // Add new RSSI sample
-        if rssiSamples[eid]!.count > sampleWindow { // Keep only last N samples
-            rssiSamples[eid]?.removeFirst() // Remove oldest sample
+        rssiSamples[identifier]?.append(rssi) // Add new RSSI sample
+        if rssiSamples[identifier]!.count > sampleWindow { // Keep only last N samples
+            rssiSamples[identifier]?.removeFirst() // Remove oldest sample
         } // End if
-        let samples = rssiSamples[eid]! // Get current samples
+        let samples = rssiSamples[identifier]! // Get current samples
         let avgRSSI = samples.reduce(0, +) / samples.count // Calculate average RSSI
         guard samples.count >= requiredSamples else { // Need minimum samples before checking
             if avgRSSI < rssiThreshold - 20 { // Very far (across room)
-                statusText = "Too far - bring phones closer" // Update status
+                statusText = isUserID ? "Too far - bring phones closer" : "Too far - bring phones closer" // Update status
             } else if avgRSSI < rssiThreshold - 10 { // Getting closer
                 statusText = "Getting closer..." // Update status
             } else { // Close but need more samples
@@ -101,12 +130,29 @@ import UIKit // For haptic feedback
         } // End guard
         let strongSamples = samples.filter { $0 > rssiThreshold }.count // Count samples above threshold
         // Require ALL samples above threshold AND average must exceed minimum (very strict - phones must be touching)
-        if strongSamples >= requiredSamples && avgRSSI > minAverageRSSI && readyToPayEID == nil { // Passes strict gate and not already set
-            readyToPayEID = eid // Mark as ready
-            statusText = "Payment session detected!" // Update status
-            let generator = UINotificationFeedbackGenerator() // Create haptic generator
-            generator.notificationOccurred(.success) // Success haptic
-            onEIDReady?(eid) // Trigger callback for auto-resolve
+        if strongSamples >= requiredSamples && avgRSSI > minAverageRSSI { // Passes strict gate
+            if isUserID { // User availability
+                // Only trigger user availability if no payment EID is ready (prioritize payment sessions)
+                if readyToPayEID == nil && readyToSendUserID == nil { // No payment EID detected yet
+                    readyToSendUserID = identifier // Mark as ready
+                    statusText = "User detected - ready to send!" // Update status
+                    let generator = UINotificationFeedbackGenerator() // Create haptic generator
+                    generator.notificationOccurred(.success) // Success haptic
+                    onUserReady?(identifier) // Trigger callback
+                } // End if
+            } else { // Payment EID (priority)
+                // Payment EIDs take priority - clear user availability if payment EID detected
+                if readyToSendUserID != nil { // User availability was detected first
+                    readyToSendUserID = nil // Clear user availability (payment session takes priority)
+                } // End if
+                if readyToPayEID == nil { // Not already set
+                    readyToPayEID = identifier // Mark as ready
+                    statusText = "Payment session detected!" // Update status
+                    let generator = UINotificationFeedbackGenerator() // Create haptic generator
+                    generator.notificationOccurred(.success) // Success haptic
+                    onEIDReady?(identifier) // Trigger callback for auto-resolve
+                } // End if
+            } // End if
         } else { // Not close enough or not all samples pass
             if avgRSSI < rssiThreshold - 20 { // Very far (across room)
                 statusText = "Too far - bring phones closer" // Update status
@@ -162,23 +208,34 @@ extension BLEManager: CBCentralManagerDelegate { // Central delegate conformance
               serviceUUIDs.contains(serviceUUID) else { // Must include our service UUID
             return // Not our service, ignore silently (too many other BLE devices)
         } // End guard
-        // Extract EID from local name (format: "GOTCHU" + EID)
-        if let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String,
-           localName.hasPrefix("GOTCHU"), // Check if starts with "GOTCHU"
-           localName.count == 16 { // Should be "GOTCHU" (6) + EID (10) = 16 chars
-            let eid = String(localName.dropFirst(6)) // Extract EID (skip "GOTCHU" prefix)
+        // Extract EID or user ID from local name
+        if let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String {
             let rssiValue = RSSI.intValue // Convert RSSI to Int
-            print("✅ BLE: Found EID=\(eid), RSSI=\(rssiValue), localName=\(localName)") // Debug log
-            Task { @MainActor in // Switch to main actor for UI updates
-                if !discoveredEIDs.contains(eid) { // Avoid duplicates
-                    discoveredEIDs.append(eid) // Append new EID
-                    print("📱 Added EID to discovered list: \(eid)") // Debug log
-                } // End duplicate check
-                checkRSSIGate(eid: eid, rssi: rssiValue) // Check if passes RSSI gate
-            } // End Task
-        } else { // Local name missing or invalid format
-            let localName = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? "none" // Get local name or "none"
-            print("❌ BLE: Local name missing or invalid format (localName=\(localName), count=\(localName.count))") // Debug log
+            if localName.hasPrefix("GOTCHU"), localName.count == 16 { // Payment EID format: "GOTCHU" (6) + EID (10) = 16 chars
+                let eid = String(localName.dropFirst(6)) // Extract EID (skip "GOTCHU" prefix)
+                print("✅ BLE: Found EID=\(eid), RSSI=\(rssiValue), localName=\(localName)") // Debug log
+                Task { @MainActor in // Switch to main actor for UI updates
+                    if !discoveredEIDs.contains(eid) { // Avoid duplicates
+                        discoveredEIDs.append(eid) // Append new EID
+                        print("📱 Added EID to discovered list: \(eid)") // Debug log
+                    } // End duplicate check
+                    checkRSSIGate(identifier: eid, rssi: rssiValue, isUserID: false) // Check if passes RSSI gate
+                } // End Task
+            } else if localName.hasPrefix("AVAIL"), localName.count == 13 { // User availability format: "AVAIL" (5) + userID (8) = 13 chars
+                let userIDShort = String(localName.dropFirst(5)) // Extract user ID short (8 chars)
+                print("✅ BLE: Found available user=\(userIDShort), RSSI=\(rssiValue), localName=\(localName)") // Debug log
+                Task { @MainActor in // Switch to main actor for UI updates
+                    if !discoveredUsers.contains(userIDShort) { // Avoid duplicates
+                        discoveredUsers.append(userIDShort) // Append new user ID
+                        print("📱 Added user to discovered list: \(userIDShort)") // Debug log
+                    } // End duplicate check
+                    checkRSSIGate(identifier: userIDShort, rssi: rssiValue, isUserID: true) // Check if passes RSSI gate
+                } // End Task
+            } else { // Unknown format
+                print("❌ BLE: Unknown local name format (localName=\(localName), count=\(localName.count))") // Debug log
+            } // End format check
+        } else { // Local name missing
+            print("❌ BLE: Local name missing") // Debug log
         } // End local name guard
     } // End didDiscover
 } // End extension

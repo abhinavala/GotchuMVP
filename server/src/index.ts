@@ -101,11 +101,13 @@ app.post("/sessions/resolve", async (req, res) => { // Resolve EID to session en
     if (!eid) { // Check if EID is provided
       return res.status(400).json({ error: "eid required" }); // Return 400 if missing
     } // End if
-    const r = await query( // Query session by EID
-      `SELECT ps.id as sid, ps.amount_cents, ps.exp_at, u.email
+    const r = await query( // Query session by EID (handle both pull and push payments)
+      `SELECT ps.id as sid, ps.amount_cents, ps.exp_at, ps.payer_id, ps.status,
+              payee_user.email as payee_email, payer_user.email as payer_email
        FROM session_eids se
        JOIN payment_sessions ps ON se.session_id = ps.id
-       JOIN users u ON ps.payee_id = u.id
+       JOIN users payee_user ON ps.payee_id = payee_user.id
+       LEFT JOIN users payer_user ON ps.payer_id = payer_user.id
        WHERE se.eid = $1
        ORDER BY se.rotated_at DESC
        LIMIT 1`, // Get most recent EID mapping
@@ -117,10 +119,15 @@ app.post("/sessions/resolve", async (req, res) => { // Resolve EID to session en
     if (new Date(r.rows[0].exp_at) < new Date()) { // Check if session expired
       return res.status(410).json({ error: "expired" }); // Return 410 if expired
     } // End if
+    const row = r.rows[0]; // Get row
+    // For push payments (payer_id set), show payee info (who to pay to)
+    // For pull payments (payer_id null), show payee info (who is requesting)
     res.json({ // Return session data
-      sid: r.rows[0].sid, // Session ID
-      amount_cents: Number(r.rows[0].amount_cents), // Convert bigint to number
-      payee_display: { name: r.rows[0].email.split("@")[0] }, // Extract name from email
+      sid: row.sid, // Session ID
+      amount_cents: Number(row.amount_cents), // Convert bigint to number
+      status: row.status, // Session status
+      payee_display: { name: row.payee_email.split("@")[0] }, // Extract name from email
+      payer_display: row.payer_email ? { name: row.payer_email.split("@")[0] } : undefined, // Payer info if push payment
     }); // End response
   } catch (e: any) { // Catch database errors
     res.status(500).json({ error: e.message }); // Return 500 with error message
@@ -155,6 +162,128 @@ app.post("/sessions/lock", requireAuth, async (req, res) => { // Lock session en
   } // End catch
 }); // End lock handler
 
+// Push payment endpoints (sender-initiated)
+app.post("/sessions/create-offer", requireAuth, async (req, res) => { // Create payment offer (sender-initiated)
+  try { // Begin try block
+    const { payee_id, amount_cents } = req.body; // Extract request body
+    if (!payee_id) { // Check if payee_id is provided
+      return res.status(400).json({ error: "payee_id required" }); // Return 400 if missing
+    } // End if
+    if (!Number.isInteger(amount_cents) || amount_cents <= 0) { // Validate amount
+      return res.status(400).json({ error: "invalid amount" }); // Return 400 if invalid
+    } // End if
+    const exp = new Date(Date.now() + 300_000); // Set expiration to 5 minutes from now
+    const userId = (req as any).userId; // Extract user ID from JWT token (this is the payer)
+    if (userId === payee_id) { // Check if user trying to pay themselves
+      return res.status(400).json({ error: "cannot pay self" }); // Return 400 if self-payment
+    } // End if
+    // Verify payee exists
+    const payeeCheck = await query("SELECT id FROM users WHERE id = $1", [payee_id]); // Check payee exists
+    if (!payeeCheck.rows.length) { // Check if payee found
+      return res.status(404).json({ error: "payee not found" }); // Return 404 if not found
+    } // End if
+    const ins = await query( // Insert new payment session with PENDING_ACCEPTANCE status
+      `INSERT INTO payment_sessions (payee_id, payer_id, amount_cents, split_mode, max_payers, exp_at, status)
+       VALUES ($1, $2, $3, 'single', 1, $4, 'PENDING_ACCEPTANCE')
+       RETURNING id`, // Return session ID
+      [payee_id, userId, amount_cents, exp] // Pass parameters
+    ); // End query
+    const sid = ins.rows[0].id; // Get session ID from result
+    const eid = newEID(); // Generate new EID
+    await query("INSERT INTO session_eids (session_id, eid) VALUES ($1, $2)", [ // Insert EID mapping
+      sid, // Session ID
+      eid, // EID string
+    ]); // End query
+    res.json({ sid, eid, exp_at: exp.toISOString() }); // Return session data
+  } catch (e: any) { // Catch database errors
+    res.status(500).json({ error: e.message }); // Return 500 with error message
+  } // End catch
+}); // End create offer handler
+
+app.get("/sessions/pending-offers", requireAuth, async (req, res) => { // Get pending payment offers for receiver
+  try { // Begin try block
+    const userId = (req as any).userId; // Extract user ID from JWT token
+    const offers = await query( // Query pending offers where user is payee
+      `SELECT ps.id as sid, ps.amount_cents, ps.exp_at, ps.created_at, u.email as payer_email
+       FROM payment_sessions ps
+       JOIN users u ON ps.payer_id = u.id
+       WHERE ps.payee_id = $1 AND ps.status = 'PENDING_ACCEPTANCE'
+       AND ps.exp_at > NOW()
+       ORDER BY ps.created_at DESC`, // Get pending offers
+      [userId] // Pass user ID as parameter
+    ); // End query
+    res.json({ // Return offers
+      offers: offers.rows.map((row) => ({ // Map rows to response format
+        sid: row.sid, // Session ID
+        amount_cents: Number(row.amount_cents), // Convert bigint to number
+        payer_display: { name: row.payer_email.split("@")[0] }, // Extract name from email
+        exp_at: row.exp_at, // Expiration time
+        created_at: row.created_at, // Creation time
+      })), // End map
+    }); // End response
+  } catch (e: any) { // Catch database errors
+    res.status(500).json({ error: e.message }); // Return 500 with error message
+  } // End catch
+}); // End pending offers handler
+
+app.post("/sessions/accept-offer", requireAuth, async (req, res) => { // Accept payment offer (receiver accepts)
+  try { // Begin try block
+    const { sid } = req.body; // Extract session ID from request body
+    if (!sid) { // Check if SID is provided
+      return res.status(400).json({ error: "sid required" }); // Return 400 if missing
+    } // End if
+    const userId = (req as any).userId; // Extract user ID from JWT token
+    const r = await query( // Query session
+      "SELECT status, exp_at, payee_id, payer_id FROM payment_sessions WHERE id = $1",
+      [sid] // Pass session ID as parameter
+    ); // End query
+    if (!r.rows.length) { // Check if session exists
+      return res.status(404).json({ error: "not found" }); // Return 404 if not found
+    } // End if
+    if (r.rows[0].payee_id !== userId) { // Check if user is the payee
+      return res.status(403).json({ error: "not authorized" }); // Return 403 if not authorized
+    } // End if
+    if (new Date(r.rows[0].exp_at) < new Date()) { // Check if session expired
+      return res.status(410).json({ error: "expired" }); // Return 410 if expired
+    } // End if
+    if (r.rows[0].status !== "PENDING_ACCEPTANCE") { // Check if session is pending
+      return res.status(409).json({ error: "offer already processed" }); // Return 409 if already processed
+    } // End if
+    // Get EID for this session
+    const eidResult = await query( // Query EID
+      "SELECT eid FROM session_eids WHERE session_id = $1 ORDER BY rotated_at DESC LIMIT 1",
+      [sid] // Pass session ID
+    ); // End query
+    const eid = eidResult.rows[0]?.eid; // Get EID
+    // Accept offer: change to ADVERTISING and lock immediately (sender will complete payment)
+    await query("UPDATE payment_sessions SET status = 'LOCKED' WHERE id = $1", [ // Update session status to LOCKED (ready for sender to pay)
+      sid, // Pass session ID
+    ]); // End query
+    res.json({ ok: true, eid, sid }); // Return success with EID
+  } catch (e: any) { // Catch database errors
+    res.status(500).json({ error: e.message }); // Return 500 with error message
+  } // End catch
+}); // End accept offer handler
+
+app.get("/users/list", requireAuth, async (req, res) => { // List all users (for sender to see who to send to)
+  try { // Begin try block
+    const userId = (req as any).userId; // Extract user ID from JWT token
+    const users = await query( // Query all users except self
+      "SELECT id, email FROM users WHERE id != $1 ORDER BY email",
+      [userId] // Pass user ID as parameter
+    ); // End query
+    res.json({ // Return users
+      users: users.rows.map((row) => ({ // Map rows to response format
+        id: row.id, // User ID
+        email: row.email, // Email
+        display_name: row.email.split("@")[0], // Extract name from email
+      })), // End map
+    }); // End response
+  } catch (e: any) { // Catch database errors
+    res.status(500).json({ error: e.message }); // Return 500 with error message
+  } // End catch
+}); // End list users handler
+
 app.post("/wallet/send", requireAuth, async (req, res) => { // Send payment endpoint
   try { // Begin try block
     const { sid } = req.body; // Extract session ID from request body
@@ -178,7 +307,7 @@ app.post("/wallet/send", requireAuth, async (req, res) => { // Send payment endp
     } // End if
 
     const sr = await query( // Query payment session
-      "SELECT id, payee_id, amount_cents, status, exp_at FROM payment_sessions WHERE id = $1",
+      "SELECT id, payee_id, payer_id, amount_cents, status, exp_at FROM payment_sessions WHERE id = $1",
       [sid] // Pass session ID as parameter
     ); // End query
     if (!sr.rows.length) { // Check if session exists
@@ -191,8 +320,16 @@ app.post("/wallet/send", requireAuth, async (req, res) => { // Send payment endp
     if (!["LOCKED", "CREATED", "ADVERTISING"].includes(s.status)) { // Check if session can be paid
       return res.status(409).json({ error: "busy/paid" }); // Return 409 if already paid
     } // End if
-    if (userId === s.payee_id) { // Check if user trying to pay themselves
-      return res.status(400).json({ error: "cannot pay self" }); // Return 400 if self-payment
+    // For push payments (payer_id set), only the payer can pay
+    // For pull payments (payer_id null), anyone except payee can pay
+    if (s.payer_id) { // Push payment (sender-initiated)
+      if (userId !== s.payer_id) { // Check if user is the payer
+        return res.status(403).json({ error: "only payer can complete this payment" }); // Return 403 if not payer
+      } // End if
+    } else { // Pull payment (receiver-initiated)
+      if (userId === s.payee_id) { // Check if user trying to pay themselves
+        return res.status(400).json({ error: "cannot pay self" }); // Return 400 if self-payment
+      } // End if
     } // End if
 
     const pW = ( // Query payer wallet
