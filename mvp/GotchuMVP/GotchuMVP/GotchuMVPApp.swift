@@ -29,8 +29,12 @@ struct GotchuMVPApp: App { // Application entry point
                     bleManager.onEIDReady = { eid in // When EID passes RSSI gate
                         Task { @MainActor in // Async task on main thread
                             // Only resolve if no pending request (avoid duplicates)
-                            if appState.pendingPaymentRequest == nil { // Check no existing request
+                            // But allow retry if request was dismissed (pendingPaymentRequest is nil)
+                            if appState.pendingPaymentRequest == nil && !appState.showPaymentRequestSheet { // Check no existing request and sheet not showing
+                                print("📱 Auto-resolving EID: \(eid)") // Debug log
                                 await appState.resolveEID(eid) // Auto-resolve the EID (shows payment request)
+                            } else { // Request already showing or pending
+                                print("📱 Skipping auto-resolve - request already showing or pending") // Debug log
                             } // End if
                         } // End task
                     } // End callback

@@ -12,7 +12,7 @@ struct ContentView: View { // Root view
     @EnvironmentObject var ble: BLEManager // Access BLE manager
     
     var body: some View { // View body
-        NavigationStack { // Navigation container
+        NavigationView { // Navigation container (iOS 15 compatible)
             ScrollView { // Allows scrolling
                 VStack(spacing: 16) { // Vertical stack with spacing
                     baseURLSection // Show server URL controls
@@ -26,7 +26,7 @@ struct ContentView: View { // Root view
                 } // End VStack
                 .padding() // Add padding
             } // End ScrollView
-            .onChange(of: state.userID) { oldValue, newValue in // When user logs in
+            .onChange(of: state.userID) { newValue in // When user logs in (iOS 15 compatible)
                 if let userID = newValue, state.autoAdvertiseAvailability { // User logged in and auto-advertise enabled
                     ble.startAdvertisingAvailability(userID: userID) // Auto-start advertising
                 } else if newValue == nil { // User logged out
@@ -59,11 +59,11 @@ struct ContentView: View { // Root view
             .sheet(isPresented: $state.showAcceptedOfferSheet) { // Show accepted offer sheet (sender completes payment)
                 acceptedOfferSheetView // Accepted offer content
             } // End sheet
-        } // End NavigationStack
+        } // End NavigationView
     } // End body
     
     private var paymentRequestSheetView: some View { // Payment request sheet (before accepting)
-        NavigationStack { // Navigation container
+        NavigationView { // Navigation container
             VStack(spacing: 24) { // Main content stack
                 if let request = state.pendingPaymentRequest { // Show payment request
                     VStack(spacing: 16) { // Info stack
@@ -119,11 +119,11 @@ struct ContentView: View { // Root view
                     } // End button
                 } // End toolbar item
             } // End toolbar
-        } // End NavigationStack
+        } // End NavigationView
     } // End paymentRequestSheetView
     
     private var paySheetView: some View { // Pay sheet that appears after locking
-        NavigationStack { // Navigation container
+        NavigationView { // Navigation container
             VStack(spacing: 24) { // Main content stack
                 if let result = state.resolveResult { // Show locked session
                     VStack(spacing: 20) { // Info stack
@@ -196,7 +196,7 @@ struct ContentView: View { // Root view
                     } // End button
                 } // End toolbar item
             } // End toolbar
-        } // End NavigationStack
+        } // End NavigationView
     } // End paySheetView
     
     private var baseURLSection: some View { // Section for base URL
@@ -309,20 +309,35 @@ struct ContentView: View { // Root view
         .padding() // Padding
         .background(Color(.secondarySystemBackground)) // Background
         .clipShape(RoundedRectangle(cornerRadius: 12)) // Rounded corners
-        .onChange(of: state.activeSession) { oldValue, newValue in // When session created
-            if let session = newValue { // New session exists
-                // Stop user availability advertising when payment session is active (prioritize payment session)
-                if let userID = getCurrentUserID(), ble.advertisingUserID == userID { // Currently advertising availability
-                    ble.stopAdvertising() // Stop user availability advertising
+            .onChange(of: state.activeSession) { newValue in // When session created (iOS 15 compatible)
+                if let session = newValue { // New session exists
+                    // Stop user availability advertising when payment session is active (prioritize payment session)
+                    if let userID = getCurrentUserID(), ble.advertisingUserID == userID { // Currently advertising availability
+                        ble.stopAdvertising() // Stop user availability advertising
+                    } // End if
+                    ble.startAdvertising(eid: session.eid) // Auto-start advertising payment session
+                } else { // Session ended (newValue is nil) - payment completed or cancelled
+                    // Stop all BLE activity after payment
+                    ble.stopAdvertising() // Stop advertising
+                    ble.stopScanning() // Stop scanning (if payer was scanning)
+                    ble.readyToPayEID = nil // Clear ready EID
+                    ble.proximityPercentage = 0.0 // Reset proximity
+                    print("🧹 BLE: Stopped all activity after session ended") // Debug log
+                    // Resume user availability advertising if auto-advertise is enabled
+                    if let userID = getCurrentUserID(), state.autoAdvertiseAvailability { // Should advertise availability
+                        ble.startAdvertisingAvailability(userID: userID) // Resume advertising availability
+                    } // End if
                 } // End if
-                ble.startAdvertising(eid: session.eid) // Auto-start advertising payment session
-            } else if oldValue != nil { // Session ended
-                // Resume user availability advertising if auto-advertise is enabled
-                if let userID = getCurrentUserID(), state.autoAdvertiseAvailability { // Should advertise availability
-                    ble.startAdvertisingAvailability(userID: userID) // Resume advertising availability
+            } // End onChange
+            .onChange(of: state.sessionLocked) { newValue in // When session lock state changes
+                if !newValue && state.resolveResult == nil { // Session unlocked and no active payment
+                    // Payment completed or cancelled - ensure BLE is stopped
+                    ble.stopScanning() // Stop scanning
+                    ble.readyToPayEID = nil // Clear ready EID
+                    ble.proximityPercentage = 0.0 // Reset proximity
+                    print("🧹 BLE: Stopped scanning after payment completed") // Debug log
                 } // End if
-            } // End if
-        } // End onChange
+            } // End onChange
     } // End sessionSection
     
     private var resolveSection: some View { // Resolve + pay UI
@@ -349,11 +364,47 @@ struct ContentView: View { // Root view
     } // End resolveSection
     
     private var bleSection: some View { // BLE controls
-        VStack(alignment: .leading, spacing: 8) { // Stack
+        VStack(alignment: .leading, spacing: 12) { // Stack
             Text("BLE Scanner") // Title
                 .font(.headline) // Headline style
             Text("Status: \(ble.statusText)") // Status label
                 .font(.caption) // Caption font
+            
+            // Proximity indicator (visual feedback)
+            if ble.proximityPercentage > 0.0 { // Show proximity indicator when scanning
+                VStack(alignment: .leading, spacing: 4) { // Proximity stack
+                    HStack { // Label row
+                        Text("Proximity") // Label
+                            .font(.caption) // Caption font
+                            .foregroundColor(.secondary) // Secondary color
+                        Spacer() // Spacer
+                        Text("\(Int(ble.proximityPercentage * 100))%") // Percentage
+                            .font(.caption) // Caption font
+                            .fontWeight(.semibold) // Semibold weight
+                            .foregroundColor(.blue) // Blue color
+                    } // End HStack
+                    GeometryReader { geometry in // Geometry reader for progress bar
+                        ZStack(alignment: .leading) { // Progress bar container
+                            RoundedRectangle(cornerRadius: 4) // Background
+                                .fill(Color(.tertiarySystemFill)) // Tertiary fill
+                                .frame(height: 8) // Height
+                            RoundedRectangle(cornerRadius: 4) // Progress fill
+                                .fill(LinearGradient( // Gradient fill
+                                    gradient: Gradient(colors: [
+                                        Color.blue.opacity(0.6), // Start color
+                                        Color.blue // End color
+                                    ]), // End gradient
+                                    startPoint: .leading, // Start point
+                                    endPoint: .trailing // End point
+                                )) // End fill
+                                .frame(width: geometry.size.width * ble.proximityPercentage, height: 8) // Width based on percentage
+                                .animation(.easeInOut(duration: 0.2), value: ble.proximityPercentage) // Smooth animation
+                        } // End ZStack
+                    } // End GeometryReader
+                    .frame(height: 8) // Fixed height
+                } // End VStack
+            } // End if
+            
             HStack { // Button row
                 Button("Start Scan") { ble.startScanning() } // Start scan button
                 Button("Stop Scan") { ble.stopScanning() } // Stop scan button
@@ -369,6 +420,11 @@ struct ContentView: View { // Root view
                             Text(eid) // Show EID
                                 .font(.caption) // Caption font
                             Spacer() // Spacer
+                            if ble.currentProximityEID == eid && ble.proximityPercentage > 0.5 { // Show indicator for closest EID
+                                Image(systemName: "waveform.path") // Proximity icon
+                                    .foregroundColor(.blue) // Blue color
+                                    .font(.caption) // Caption font
+                            } // End if
                             Image(systemName: "arrow.right.circle.fill") // Icon
                         } // End HStack
                     } // End button
@@ -419,9 +475,9 @@ struct ContentView: View { // Root view
                     .foregroundColor(.orange) // Orange color
             } // End if
             // Advertise availability for push payments
-            if let wallet = state.wallet, let userID = getCurrentUserID() { // Check if logged in
+            if let userID = getCurrentUserID() { // Check if logged in
                 Toggle("Auto-advertise availability", isOn: $state.autoAdvertiseAvailability) // Toggle for auto-advertise
-                    .onChange(of: state.autoAdvertiseAvailability) { oldValue, newValue in // When toggle changes
+                    .onChange(of: state.autoAdvertiseAvailability) { newValue in // When toggle changes (iOS 15 compatible)
                         if newValue { // Enabled
                             ble.startAdvertisingAvailability(userID: userID) // Start advertising
                         } else { // Disabled
@@ -474,7 +530,7 @@ struct ContentView: View { // Root view
     } // End getCurrentUserID
     
     private var sendMoneySheetView: some View { // Send money sheet
-        NavigationStack { // Navigation container
+        NavigationView { // Navigation container
             VStack(spacing: 24) { // Main content stack
                 TextField("Amount in dollars", text: $state.sendAmountInput) // Amount field
                     .keyboardType(.decimalPad) // Decimal keyboard
@@ -529,11 +585,11 @@ struct ContentView: View { // Root view
                     } // End button
                 } // End toolbar item
             } // End toolbar
-        } // End NavigationStack
+        } // End NavigationView
     } // End sendMoneySheetView
     
     private var acceptedOfferSheetView: some View { // Accepted offer sheet (sender completes payment)
-        NavigationStack { // Navigation container
+        NavigationView { // Navigation container
             VStack(spacing: 24) { // Main content stack
                 if let result = state.resolveResult, state.sessionLocked { // Show accepted offer
                     VStack(spacing: 16) { // Info stack
@@ -591,11 +647,11 @@ struct ContentView: View { // Root view
                     } // End button
                 } // End toolbar item
             } // End toolbar
-        } // End NavigationStack
+        } // End NavigationView
     } // End acceptedOfferSheetView
     
     private var pendingOfferPopupView: some View { // Pending offer popup (automatic)
-        NavigationStack { // Navigation container
+        NavigationView { // Navigation container
             VStack(spacing: 24) { // Main content stack
                 if let offer = state.pendingOfferPopup { // Show offer
                     let isAccepted = state.acceptedOfferSIDForReceiver == offer.sid // Check if accepted
@@ -698,11 +754,11 @@ struct ContentView: View { // Root view
                     } // End if
                 } // End toolbar item
             } // End toolbar
-        } // End NavigationStack
+        } // End NavigationView
     } // End pendingOfferPopupView
     
     private var pendingOffersSheetView: some View { // Pending offers sheet
-        NavigationStack { // Navigation container
+        NavigationView { // Navigation container
             VStack(spacing: 16) { // Main content stack
                 if state.pendingOffers.isEmpty { // No offers
                     Text("No pending offers") // Placeholder
@@ -742,7 +798,7 @@ struct ContentView: View { // Root view
                     } // End button
                 } // End toolbar item
             } // End toolbar
-        } // End NavigationStack
+        } // End NavigationView
     } // End pendingOffersSheetView
     
     private var loadingOverlay: some View { // Loading overlay view

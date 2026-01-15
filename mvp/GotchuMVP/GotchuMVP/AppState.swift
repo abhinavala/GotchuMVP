@@ -143,6 +143,11 @@ import Foundation // Provides Combine + async features
             lastError = "Enter amount in dollars" // Validation error
             return // Exit
         } // End guard
+        // Clear any existing session state before creating new one
+        if activeSession != nil { // Existing session
+            activeSession = nil // Clear old session first
+            try? await Task.sleep(nanoseconds: 200_000_000) // Brief delay to ensure cleanup
+        } // End if
         isLoading = true // Start loading
         do { // Begin try block
             activeSession = try await api.createSession(amount: cents, token: token) // Create session
@@ -225,14 +230,8 @@ import Foundation // Provides Combine + async features
             _ = try await api.sendPayment(sid: resolved.sid, token: token, idempotencyKey: UUID().uuidString) // Send funds (session already locked)
             // Refresh wallet in background (don't wait if it fails)
             Task { await refreshWallet() } // Refresh wallet asynchronously
-            // Clear all state immediately
-            resolveResult = nil // Clear resolved state
-            pendingPaymentRequest = nil // Clear pending request
-            sessionLocked = false // Clear lock flag
-            showPaySheet = false // Hide pay sheet
-            showAcceptedOfferSheet = false // Hide accepted offer sheet
-            acceptedOfferSID = nil // Clear accepted offer ID
-            isLoading = false // Stop loading immediately after payment succeeds
+            // Complete cleanup after successful payment
+            await cleanupAfterPayment() // Clean up all state and BLE
         } catch { // Handle errors
             isLoading = false // Stop loading on error
             if let apiError = error as? APIError { // Check if it's an API error
@@ -242,6 +241,23 @@ import Foundation // Provides Combine + async features
             } // End if
         } // End catch
     } // End sendPayment
+    
+    @MainActor
+    func cleanupAfterPayment() async { // Cleans up all state and BLE after payment
+        // Clear all payment-related state
+        resolveResult = nil // Clear resolved state
+        pendingPaymentRequest = nil // Clear pending request
+        sessionLocked = false // Clear lock flag
+        showPaySheet = false // Hide pay sheet
+        showAcceptedOfferSheet = false // Hide accepted offer sheet
+        showPaymentRequestSheet = false // Hide payment request sheet
+        acceptedOfferSID = nil // Clear accepted offer ID
+        activeSession = nil // Clear active session (triggers BLE cleanup via ContentView onChange)
+        isLoading = false // Stop loading
+        // Small delay to ensure server processes payment before allowing new session
+        try? await Task.sleep(nanoseconds: 500_000_000) // Wait 0.5 seconds
+        print("🧹 Cleaned up state after payment") // Debug log
+    } // End cleanupAfterPayment
     
     func loadUsers() async { // Loads list of available users
         guard let token = authToken else { // Ensure token exists
@@ -324,7 +340,7 @@ import Foundation // Provides Combine + async features
     } // End startOfferStatusPolling
     
     private func checkAcceptedOffers() async { // Checks if any of my offers were accepted
-        guard let token = authToken else { return } // Exit if not logged in
+        guard authToken != nil else { return } // Exit if not logged in
         for (sid, eid) in myCreatedOffers { // Check each offer I created
             do { // Begin try block
                 let resolved = try await api.resolve(eid: eid) // Try to resolve
@@ -401,15 +417,12 @@ import Foundation // Provides Combine + async features
                 // Update state
                 completedOfferSID = sid // Mark as completed
                 acceptedOfferSIDForReceiver = nil // Clear accepted tracking
+                // Clean up all state after receiving payment
+                await cleanupAfterPayment() // Clean up state (activeSession will trigger BLE cleanup)
                 // Refresh wallet in background silently (don't show errors)
                 Task { @MainActor in
                     guard authToken != nil else { return } // Exit if not logged in
-                    do {
-                        await refreshWallet() // Refresh wallet using existing method (handles errors silently)
-                    } catch {
-                        // Silently ignore wallet refresh errors - payment already completed
-                        // Don't set lastError here - payment succeeded, wallet refresh is just a bonus
-                    } // End catch
+                    await refreshWallet() // Refresh wallet using existing method (handles errors silently)
                 } // End task
             } // End if
         } catch is CancellationError { // Handle cancellation silently
